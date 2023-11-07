@@ -1,2 +1,2 @@
-gcc -o client client.c -lssl -lcrypto
-gcc -o server server.c
+g++ -o client client.cpp -lssl -lcrypto
+g++ -o server server.cpp
