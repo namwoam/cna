@@ -74,6 +74,7 @@ std::string generate_list(int user_index)
 void *connection_work(void *ptr)
 {
     int worker_index = *((int *)ptr);
+    int login_status = -1;
     free(ptr);
     struct sockaddr_in client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -90,8 +91,9 @@ void *connection_work(void *ptr)
         {
             break;
         }
-        int login_status = -1;
-        std::string clean_message(worker_buffer[worker_index]);
+        std::cout << "message length:" << message_len << std::endl;
+        std::string clean_message = std::string(worker_buffer[worker_index]);
+        clean_message.resize(message_len);
         std::string return_message = "290 Server failed to handle\r\n";
         clean_message.erase(std::remove(clean_message.begin(), clean_message.end(), '\n'), clean_message.end());
         std::cout << "worker " << worker_index << " received: " << clean_message << std::endl;
@@ -99,7 +101,7 @@ void *connection_work(void *ptr)
         {
 
             return_message = "Bye\r\n";
-            if (login_status < 0)
+            if (login_status >= 0)
             {
                 users.at(login_status).logged_in = false;
             }
@@ -108,6 +110,7 @@ void *connection_work(void *ptr)
         }
         else if (clean_message == "List")
         {
+            std::cout << "login status:" << login_status << std::endl;
             if (login_status < 0)
             {
                 return_message = "230 Unauthorized\r\n";
@@ -142,7 +145,61 @@ void *connection_work(void *ptr)
                 printf("New user:%s\n", users.back().name.c_str());
             }
         }
-        else if (clean_message.find("#") != std::string::npos)
+        else if (std::count_if(clean_message.begin(), clean_message.end(), [](char c)
+                               { return c == '#'; }) == 2)
+        {
+            std::string sender_name, amount_str, receiver_name;
+            int parser_status = 0;
+            for (auto ch : clean_message)
+            {
+                if (ch == '#')
+                {
+                    parser_status += 1;
+                }
+                else if (parser_status == 0)
+                {
+                    sender_name.push_back(ch);
+                }
+                else if (parser_status == 1)
+                {
+                    amount_str.push_back(ch);
+                }
+                else if (parser_status == 2)
+                {
+                    receiver_name.push_back(ch);
+                }
+            }
+            if (login_status < 0)
+            {
+                return_message = "230 Unauthorized\r\n";
+            }
+            if (receiver_name != users.at(login_status).name)
+            {
+                return_message = "250 Forbidden\r\n";
+            }
+            else
+            {
+                int amount = std::stoi(amount_str);
+                bool transaction_success = false;
+                for (auto &user : users)
+                {
+                    if (user.name == sender_name)
+                    {
+                        user.balance -= amount;
+                        users.at(login_status).balance += amount;
+                        return_message = "100 OK\r\n";
+                        transaction_success = true;
+                        break;
+                    }
+                }
+                if (transaction_success == false)
+                {
+                    return_message = "260 User Not Found\r\n";
+                }
+            }
+        }
+        else if (std::count_if(clean_message.begin(), clean_message.end(), [](char c)
+                               { return c == '#'; }) == 1)
         {
             std::string username, port_string;
             int parser_status = 0;
@@ -166,7 +223,7 @@ void *connection_work(void *ptr)
             bool valid_user = false;
             for (auto &user : users)
             {
-                if (user.name == username && user.logged_in == false)
+                if (user.name == username && user.logged_in == false && login_status < 0)
                 {
                     user.logged_in = true;
                     user.p2p_port = port;
