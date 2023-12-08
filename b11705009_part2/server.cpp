@@ -94,13 +94,13 @@ void *connection_work(void *ptr)
         std::cout << "message length:" << message_len << std::endl;
         std::string clean_message = std::string(worker_buffer[worker_index]);
         clean_message.resize(message_len);
-        std::string return_message = "290 Server failed to handle\n";
+        std::string return_message = "290 Server failed to handle\r\n";
         clean_message.erase(std::remove(clean_message.begin(), clean_message.end(), '\n'), clean_message.end());
         std::cout << "worker " << worker_index << " received: " << clean_message << std::endl;
         if (clean_message == "Exit")
         {
 
-            return_message = "Bye\n";
+            return_message = "Bye\r\n";
             if (login_status >= 0)
             {
                 users.at(login_status).logged_in = false;
@@ -113,7 +113,7 @@ void *connection_work(void *ptr)
             std::cout << "login status:" << login_status << std::endl;
             if (login_status < 0)
             {
-                return_message = "230 Unauthorized\n";
+                return_message = "230 Unauthorized\r\n";
             }
             else
             {

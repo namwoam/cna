@@ -15,6 +15,12 @@
 #include <vector>
 #include <sstream>
 
+// openssl lib
+// #include <openssl/applink.c>
+#include <openssl/bio.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #define worker_count 64
 #define worker_idle 0
 #define worker_working 1
@@ -25,7 +31,30 @@ pthread_t workers[worker_count];
 int worker_status[worker_count] = {worker_idle};
 int worker_sockets[worker_count];
 char worker_buffer[worker_count][buffer_size] = {0};
+SSL_CTX *ctxs[worker_count];
+SSL *ssls[worker_count];
+int ssl_fd[worker_count];
+
 int server_fd;
+
+void InitializeSSL()
+{
+    SSL_load_error_strings();
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+}
+
+void DestroySSL()
+{
+    ERR_free_strings();
+    EVP_cleanup();
+}
+
+void ShutdownSSL(SSL *cSSL)
+{
+    SSL_shutdown(cSSL);
+    SSL_free(cSSL);
+}
 
 struct User
 {
@@ -53,7 +82,8 @@ std::string generate_list(int user_index)
     }
     std::stringstream ss;
     ss << users.at(user_index).balance << "\n";
-    ss << "Information_management" << "\n";
+    ss << "Information_management"
+       << "\n";
     std::vector<struct User> online_users;
     for (auto user : users)
     {
@@ -83,10 +113,26 @@ void *connection_work(void *ptr)
     getsockname(worker_sockets[worker_index], (struct sockaddr *)&client_addr, &addr_len);
     inet_ntop(AF_INET, &client_addr.sin_addr, client_host, sizeof(client_host));
     client_port = ntohs(client_addr.sin_port);
+
+
+    ctxs[worker_index] = SSL_CTX_new(TLS_server_method());
+    SSL_CTX_set_options(ctxs[worker_index], SSL_OP_SINGLE_DH_USE);
+    int use_cert = SSL_CTX_use_certificate_file(ctxs[worker_index], "./servercert.pem", SSL_FILETYPE_PEM);
+    int use_prv = SSL_CTX_use_PrivateKey_file(ctxs[worker_index], "./serverkey.pem", SSL_FILETYPE_PEM);
+    ssls[worker_index] = SSL_new(ctxs[worker_index]);
+    SSL_set_fd(ssls[worker_index], ssl_fd[worker_index]);
+    int ssl_err = SSL_accept(ssls[worker_index]);
+    if (ssl_err <= 0)
+    {
+        // Error occurred, log and close down ssl
+        ShutdownSSL(ssls[worker_index]);
+        exit(EXIT_FAILURE);
+    }
     std::cout << "Receiving client form host:" << client_host << " port:" << client_port << std::endl;
     while (1)
     {
-        int message_len = read(worker_sockets[worker_index], worker_buffer[worker_index], buffer_size - 1);
+        int message_len = SSL_read(ssls[worker_index], (char *)worker_buffer[worker_index], buffer_size - 1);
+        // int message_len = read(worker_sockets[worker_index], worker_buffer[worker_index], buffer_size - 1);
         if (message_len <= 0)
         {
             break;
@@ -105,7 +151,7 @@ void *connection_work(void *ptr)
             {
                 users.at(login_status).logged_in = false;
             }
-            send(worker_sockets[worker_index], return_message.c_str(), return_message.length(), 0);
+            SSL_write(ssls[worker_index], return_message.c_str(), return_message.length());
             break;
         }
         else if (clean_message == "List")
@@ -134,11 +180,11 @@ void *connection_work(void *ptr)
             }
             if (error_flag)
             {
-                return_message = "210 FAIL\r\n";
+                return_message = "210 FAIL\n";
             }
             else
             {
-                return_message = "100 OK\r\n";
+                return_message = "100 OK\n";
                 struct User new_user;
                 new_user.name = new_username;
                 users.push_back(new_user);
@@ -244,10 +290,11 @@ void *connection_work(void *ptr)
         {
             return_message = "240 Format Error\n";
         }
-        send(worker_sockets[worker_index], return_message.c_str(), return_message.length(), 0);
+        SSL_write(ssls[worker_index], return_message.c_str(), return_message.length());
     }
     printf("worker %d terminate\n", worker_index);
     worker_status[worker_index] = worker_idle;
+    ShutdownSSL(ssls[worker_index]);
     close(worker_sockets[worker_index]);
 }
 
