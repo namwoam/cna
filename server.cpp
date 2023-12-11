@@ -49,7 +49,7 @@ std::string generate_list(int user_index)
 {
     if (user_index < 0 || user_index >= users.size() || users.at(user_index).logged_in == false)
     {
-        return std::string("500 Internal Error\r\n");
+        return std::string("500 Internal Error\n");
     }
     std::stringstream ss;
     ss << users.at(user_index).balance << "\n";
@@ -65,7 +65,7 @@ std::string generate_list(int user_index)
     ss << online_users.size() << "\n";
     for (auto user : online_users)
     {
-        ss << user.name << '#' << user.hostname << '#' << user.p2p_port << "\r\n";
+        ss << user.name << '#' << user.hostname << '#' << user.p2p_port << "\n";
     }
     std::string result = ss.str();
     return result;
@@ -134,11 +134,11 @@ void *connection_work(void *ptr)
             }
             if (error_flag)
             {
-                return_message = "210 FAIL\r\n";
+                return_message = "210 FAIL\n";
             }
             else
             {
-                return_message = "100 OK\r\n";
+                return_message = "100 OK\n";
                 struct User new_user;
                 new_user.name = new_username;
                 users.push_back(new_user);
@@ -187,7 +187,7 @@ void *connection_work(void *ptr)
                     {
                         user.balance -= amount;
                         users.at(login_status).balance += amount;
-                        return_message = "100 OK\r\n";
+                        return_message = "100 OK\n";
                         transaction_success = true;
                         break;
                     }

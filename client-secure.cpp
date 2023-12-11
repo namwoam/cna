@@ -17,11 +17,19 @@
 #include <sstream>
 #include <vector>
 
+// openssl lib
+
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
 #define buffer_size 1024
 int client_fd;
 int host_payment_fd;
 pthread_t payment_thread;
 pthread_mutex_t display_lock;
+
+SSL_CTX *ctx, *server_ctx;
+SSL *client_ssl;
 
 void intHandler(int dummy)
 {
@@ -86,15 +94,59 @@ void *receive_payment(void *ptr)
             perror("accept");
             exit(EXIT_FAILURE);
         }
-        read(connection_fd, buffer, buffer_size - 1);
+        SSL *server_ssl = SSL_new(server_ctx);
+        if (!server_ssl)
+        {
+            fprintf(stderr, "Failed to create SSL connection: %s\n", ERR_error_string(ERR_get_error(), NULL));
+            exit(EXIT_FAILURE);
+        }
+        SSL_set_fd(server_ssl, connection_fd);
+        printf("handshake started\n");
+        if (SSL_accept(server_ssl) <= 0)
+        {
+            fprintf(stderr, "SSL handshake failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
+            exit(EXIT_FAILURE);
+        }
+        SSL_read(server_ssl, buffer, buffer_size - 1);
         std::cout << "Received payment:" << buffer << std::endl;
-        send(client_fd, buffer, strlen(buffer), 0);
+        std::string message = "received payment";
+        SSL_write(server_ssl, message.c_str(), message.length());
+        SSL_write(client_ssl, buffer, strlen(buffer));
+        SSL_shutdown(server_ssl);
+        SSL_free(server_ssl);
         close(connection_fd);
     }
 }
 
 int main(int argc, char *argv[])
 {
+    SSL_library_init();
+    SSL_load_error_strings();
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx)
+    {
+        fprintf(stderr, "Failed to create SSL context: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        return 1;
+    }
+    server_ctx = SSL_CTX_new(TLS_server_method());
+    if (!server_ctx)
+    {
+        fprintf(stderr, "Failed to create SSL context: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server's certificate and private key
+    if (SSL_CTX_use_certificate_file(server_ctx, "servercert.pem", SSL_FILETYPE_PEM) <= 0)
+    {
+        fprintf(stderr, "Failed to load certificate: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(server_ctx, "serverkey.pem", SSL_FILETYPE_PEM) <= 0)
+    {
+        fprintf(stderr, "Failed to load private key: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
     signal(SIGINT, intHandler);
     if (pthread_mutex_init(&display_lock, NULL) != 0)
     {
@@ -145,6 +197,20 @@ int main(int argc, char *argv[])
         }
         std::cout << "Successfully connected to socket server at " << server_host << ":" << server_port << std::endl;
         std::string username, payee_username;
+        client_ssl = SSL_new(ctx);
+        if (!client_ssl)
+        {
+            fprintf(stderr, "Failed to create SSL connection: %s\n", ERR_error_string(ERR_get_error(), NULL));
+            exit(EXIT_FAILURE);
+        }
+        SSL_set_fd(client_ssl, client_fd);
+
+        // Do the handshake
+        if (SSL_connect(client_ssl) <= 0)
+        {
+            fprintf(stderr, "SSL handshake failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
+            exit(EXIT_FAILURE);
+        }
         while (1)
         {
             std::cout << "========" << std::endl;
@@ -194,7 +260,7 @@ int main(int argc, char *argv[])
             {
                 std::cout << "Command: Terminate connection" << std::endl;
                 send_message = "Exit";
-                send(client_fd, send_message.c_str(), send_message.length(), 0);
+                SSL_write(client_ssl, send_message.c_str(), send_message.length());
                 close(client_fd);
                 break;
             }
@@ -253,11 +319,29 @@ int main(int argc, char *argv[])
                     printf("failed to establish payment connection\n");
                     continue;
                 }
+                SSL *ssl = SSL_new(ctx);
+                if (!ssl)
+                {
+                    fprintf(stderr, "Failed to create SSL connection: %s\n", ERR_error_string(ERR_get_error(), NULL));
+                    continue;
+                }
+                SSL_set_fd(ssl, payment_fd);
+                if (SSL_connect(ssl) <= 0)
+                {
+                    fprintf(stderr, "SSL handshake failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
+                    continue;
+                }
                 std::string payment_message = username + std::string("#") + std::to_string(payment_amount) + std::string("#") + payee_username;
-                send(payment_fd, payment_message.c_str(), payment_message.length(), 0);
+                SSL_write(ssl, payment_message.c_str(), payment_message.length());
+                char p2p_buffer[buffer_size] = {0};
+                SSL_read(ssl, p2p_buffer, buffer_size - 1);
+                std::string p2p_receive_message = std::string(p2p_buffer);
+                std::cout << p2p_receive_message << std::endl;
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
                 close(payment_fd);
                 char buffer[buffer_size] = {0};
-                read(client_fd, buffer, buffer_size - 1);
+                SSL_read(client_ssl, buffer, buffer_size - 1);
                 std::string receive_message = std::string(buffer);
                 std::cout << receive_message << std::endl;
                 continue;
@@ -268,9 +352,9 @@ int main(int argc, char *argv[])
                 continue;
             }
             // std::cout << "send_message:" << send_message << std::endl;
-            send(client_fd, send_message.c_str(), send_message.length(), 0);
+            SSL_write(client_ssl, send_message.c_str(), send_message.length());
             char buffer[buffer_size] = {0};
-            read(client_fd, buffer, buffer_size - 1);
+            SSL_read(client_ssl, buffer, buffer_size - 1);
             std::string receive_message = std::string(buffer);
             if (command == 1)
             {
@@ -352,6 +436,10 @@ int main(int argc, char *argv[])
             }
         }
     }
+    SSL_CTX_free(ctx);
+    SSL_CTX_free(server_ctx);
+    ERR_free_strings();
+    EVP_cleanup();
 
     return 0;
 }

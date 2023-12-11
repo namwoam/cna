@@ -16,8 +16,7 @@
 #include <sstream>
 
 // openssl lib
-// #include <openssl/applink.c>
-#include <openssl/bio.h>
+
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -31,30 +30,10 @@ pthread_t workers[worker_count];
 int worker_status[worker_count] = {worker_idle};
 int worker_sockets[worker_count];
 char worker_buffer[worker_count][buffer_size] = {0};
-SSL_CTX *ctxs[worker_count];
-SSL *ssls[worker_count];
-int ssl_fd[worker_count];
-
 int server_fd;
 
-void InitializeSSL()
-{
-    SSL_load_error_strings();
-    SSL_library_init();
-    OpenSSL_add_all_algorithms();
-}
-
-void DestroySSL()
-{
-    ERR_free_strings();
-    EVP_cleanup();
-}
-
-void ShutdownSSL(SSL *cSSL)
-{
-    SSL_shutdown(cSSL);
-    SSL_free(cSSL);
-}
+SSL_CTX *ctx;
+SSL *ssls[worker_count];
 
 struct User
 {
@@ -70,6 +49,9 @@ std::vector<struct User> users;
 void intHandler(int dummy)
 {
     close(server_fd);
+    SSL_CTX_free(ctx);
+    ERR_free_strings();
+    EVP_cleanup();
     printf("Server terminated\n");
     exit(EXIT_SUCCESS);
 }
@@ -78,7 +60,7 @@ std::string generate_list(int user_index)
 {
     if (user_index < 0 || user_index >= users.size() || users.at(user_index).logged_in == false)
     {
-        return std::string("500 Internal Error\r\n");
+        return std::string("500 Internal Error\n");
     }
     std::stringstream ss;
     ss << users.at(user_index).balance << "\n";
@@ -95,7 +77,7 @@ std::string generate_list(int user_index)
     ss << online_users.size() << "\n";
     for (auto user : online_users)
     {
-        ss << user.name << '#' << user.hostname << '#' << user.p2p_port << "\r\n";
+        ss << user.name << '#' << user.hostname << '#' << user.p2p_port << "\n";
     }
     std::string result = ss.str();
     return result;
@@ -113,26 +95,23 @@ void *connection_work(void *ptr)
     getsockname(worker_sockets[worker_index], (struct sockaddr *)&client_addr, &addr_len);
     inet_ntop(AF_INET, &client_addr.sin_addr, client_host, sizeof(client_host));
     client_port = ntohs(client_addr.sin_port);
-
-
-    ctxs[worker_index] = SSL_CTX_new(TLS_server_method());
-    SSL_CTX_set_options(ctxs[worker_index], SSL_OP_SINGLE_DH_USE);
-    int use_cert = SSL_CTX_use_certificate_file(ctxs[worker_index], "./servercert.pem", SSL_FILETYPE_PEM);
-    int use_prv = SSL_CTX_use_PrivateKey_file(ctxs[worker_index], "./serverkey.pem", SSL_FILETYPE_PEM);
-    ssls[worker_index] = SSL_new(ctxs[worker_index]);
-    SSL_set_fd(ssls[worker_index], ssl_fd[worker_index]);
-    int ssl_err = SSL_accept(ssls[worker_index]);
-    if (ssl_err <= 0)
+    std::cout << "Receiving client form host:" << client_host << " port:" << client_port << std::endl;
+    ssls[worker_index] = SSL_new(ctx);
+    if (!ssls[worker_index])
     {
-        // Error occurred, log and close down ssl
-        ShutdownSSL(ssls[worker_index]);
+        fprintf(stderr, "Failed to create SSL connection: %s\n", ERR_error_string(ERR_get_error(), NULL));
         exit(EXIT_FAILURE);
     }
-    std::cout << "Receiving client form host:" << client_host << " port:" << client_port << std::endl;
+    SSL_set_fd(ssls[worker_index], worker_sockets[worker_index]);
+    if (SSL_accept(ssls[worker_index]) <= 0)
+    {
+        fprintf(stderr, "SSL handshake failed: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
     while (1)
     {
-        int message_len = SSL_read(ssls[worker_index], (char *)worker_buffer[worker_index], buffer_size - 1);
-        // int message_len = read(worker_sockets[worker_index], worker_buffer[worker_index], buffer_size - 1);
+        int message_len = SSL_read(ssls[worker_index], worker_buffer[worker_index], buffer_size - 1);
         if (message_len <= 0)
         {
             break;
@@ -233,7 +212,7 @@ void *connection_work(void *ptr)
                     {
                         user.balance -= amount;
                         users.at(login_status).balance += amount;
-                        return_message = "100 OK\r\n";
+                        return_message = "100 OK\n";
                         transaction_success = true;
                         break;
                     }
@@ -294,12 +273,15 @@ void *connection_work(void *ptr)
     }
     printf("worker %d terminate\n", worker_index);
     worker_status[worker_index] = worker_idle;
-    ShutdownSSL(ssls[worker_index]);
+    SSL_shutdown(ssls[worker_index]);
+    SSL_free(ssls[worker_index]);
     close(worker_sockets[worker_index]);
 }
 
 int main(int argc, char const *argv[])
 {
+    SSL_library_init();
+    SSL_load_error_strings();
     signal(SIGINT, intHandler);
     printf("CNA socket server\n");
     if (argc < 2)
@@ -342,6 +324,25 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
     printf("Listening for new client\n");
+    ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx)
+    {
+        fprintf(stderr, "Failed to create SSL context: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    // Load the server's certificate and private key
+    if (SSL_CTX_use_certificate_file(ctx, "servercert.pem", SSL_FILETYPE_PEM) <= 0)
+    {
+        fprintf(stderr, "Failed to load certificate: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "serverkey.pem", SSL_FILETYPE_PEM) <= 0)
+    {
+        fprintf(stderr, "Failed to load private key: %s\n", ERR_error_string(ERR_get_error(), NULL));
+        exit(EXIT_FAILURE);
+    }
     while (1)
     {
         for (int i = 0; i < worker_count; i++)
