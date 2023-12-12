@@ -340,10 +340,6 @@ int main(int argc, char *argv[])
                 SSL_shutdown(ssl);
                 SSL_free(ssl);
                 close(payment_fd);
-                char buffer[buffer_size] = {0};
-                SSL_read(client_ssl, buffer, buffer_size - 1);
-                std::string receive_message = std::string(buffer);
-                std::cout << receive_message << std::endl;
                 continue;
             }
             else
